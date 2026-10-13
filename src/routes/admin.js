@@ -3,10 +3,6 @@ import { z } from 'zod';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { ROLES } from '../models/User.js';
 import { recordAudit } from '../services/audit.js';
-import { geocodeSessionPoints } from '../services/geocodeSession.js';
-import { TrackingLocationPoint } from '../models/TrackingLocationPoint.js';
-import { getDashboardSummary } from '../services/dashboard.js';
-
 import {
   listEmployees,
   getEmployeeById,
@@ -20,10 +16,12 @@ import {
   listSessionPoints,
   forceCloseSession,
 } from '../services/tracking.js';
-import { notFound } from '../lib/errors.js';
-
+import { getDashboardSummary } from '../services/dashboard.js';
 import { reverseGeocode } from '../services/geocode.js';
+import { getRoute } from '../services/directionsMapbox.js';
 import { TrackingSession } from '../models/TrackingSession.js';
+import { TrackingLocationPoint } from '../models/TrackingLocationPoint.js';
+import { notFound } from '../lib/errors.js';
 
 const router = Router();
 
@@ -31,10 +29,21 @@ const router = Router();
 router.use(requireAuth, requireRole(ROLES.OWNER));
 
 // ============================================================================
-// Employees
+// Dashboard summary
 // ============================================================================
 
-// ---------- List ----------
+router.get('/dashboard/summary', async (_req, res, next) => {
+  try {
+    const summary = await getDashboardSummary();
+    res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ============================================================================
+// Employees
+// ============================================================================
 
 const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).max(10_000).default(1),
@@ -54,8 +63,6 @@ router.get('/employees', async (req, res, next) => {
   }
 });
 
-// ---------- Detail ----------
-
 router.get('/employees/:id', async (req, res, next) => {
   try {
     const employee = await getEmployeeById(req.params.id);
@@ -64,8 +71,6 @@ router.get('/employees/:id', async (req, res, next) => {
     next(err);
   }
 });
-
-// ---------- Create ----------
 
 const createSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -101,8 +106,6 @@ router.post('/employees', async (req, res, next) => {
   }
 });
 
-// ---------- Update ----------
-
 const updateSchema = z
   .object({
     name: z.string().trim().min(2).max(120).optional(),
@@ -131,7 +134,6 @@ router.patch('/employees/:id', async (req, res, next) => {
       reason,
     });
 
-    // Choose a specific action name when the mutation is a status toggle.
     let action = 'EMPLOYEE_UPDATE';
     if (fields.active !== undefined && result.before.active !== result.after.active) {
       action = result.after.active ? 'EMPLOYEE_ACTIVATE' : 'EMPLOYEE_DEACTIVATE';
@@ -153,7 +155,7 @@ router.patch('/employees/:id', async (req, res, next) => {
 });
 
 // ============================================================================
-// Tracking sessions (Phase 4)
+// Tracking sessions
 // ============================================================================
 
 const sessionListQuerySchema = z.object({
@@ -196,7 +198,6 @@ router.get('/tracking/sessions/:id', async (req, res, next) => {
 
 router.get('/tracking/sessions/:id/locations', async (req, res, next) => {
   try {
-    // Ensure the session exists (404 if not) before listing points.
     await getSessionForOwner({ sessionId: req.params.id });
     const points = await listSessionPoints({ sessionId: req.params.id });
     res.json({ points });
@@ -204,6 +205,58 @@ router.get('/tracking/sessions/:id/locations', async (req, res, next) => {
     next(err);
   }
 });
+
+// ---------- Geocode session start/end ----------
+
+router.get('/tracking/sessions/:id/geocode', async (req, res, next) => {
+  try {
+    const session = await TrackingSession.findById(req.params.id).lean();
+    if (!session) throw notFound('Session not found');
+
+    const [startAddress, endAddress] = await Promise.all([
+      session.startLocation
+        ? reverseGeocode(session.startLocation.latitude, session.startLocation.longitude)
+        : Promise.resolve(null),
+      session.endLocation
+        ? reverseGeocode(session.endLocation.latitude, session.endLocation.longitude)
+        : Promise.resolve(null),
+    ]);
+
+    res.json({
+      sessionId: String(session._id),
+      startAddress: startAddress || null,
+      endAddress: endAddress || null,
+      attribution: '© Mapbox, data © OpenStreetMap contributors',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Geocoded points for session ----------
+
+router.get('/tracking/sessions/:id/geocoded-points', async (req, res, next) => {
+  try {
+    await getSessionForOwner({ sessionId: req.params.id });
+    const points = await TrackingLocationPoint.find({ sessionId: req.params.id })
+      .sort({ capturedAt: 1 })
+      .lean();
+
+    const { geocodeSessionPoints } = await import('../services/geocodeSession.js');
+    const geocoded = await geocodeSessionPoints(points);
+
+    res.json({
+      sessionId: req.params.id,
+      points: geocoded,
+      clusterRadiusMeters: 100,
+      attribution: '© Mapbox, data © OpenStreetMap contributors',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Force close ----------
 
 const forceCloseSchema = z.object({
   reason: z.string().trim().max(500).optional(),
@@ -229,67 +282,46 @@ router.post('/tracking/sessions/:id/force-close', async (req, res, next) => {
   }
 });
 
+// ============================================================================
+// Mapbox route — actual road-following route for a session
+// ============================================================================
 
-
-router.get('/tracking/sessions/:id/geocode', async (req, res, next) => {
-  try {
-    const session = await TrackingSession.findById(req.params.id).lean();
-    if (!session) throw notFound('Session not found');
-
-    const [startAddress, endAddress] = await Promise.all([
-      session.startLocation
-        ? reverseGeocode(session.startLocation.latitude, session.startLocation.longitude)
-        : Promise.resolve(null),
-      session.endLocation
-        ? reverseGeocode(session.endLocation.latitude, session.endLocation.longitude)
-        : Promise.resolve(null),
-    ]);
-
-    res.json({
-      sessionId: String(session._id),
-      startAddress: startAddress || null,
-      endAddress: endAddress || null,
-      attribution: '© OpenStreetMap contributors',
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-
-
-
-/**
- * GET /api/admin/tracking/sessions/:id/geocoded-points
- * Owner-only. Returns each point with a cluster-aware address.
- * This is used by the web dashboard (Phase 6). The mobile app does not
- * call this endpoint — employees only see start/end addresses.
- */
-router.get('/tracking/sessions/:id/geocoded-points', async (req, res, next) => {
+router.get('/tracking/sessions/:id/route', async (req, res, next) => {
   try {
     await getSessionForOwner({ sessionId: req.params.id });
     const points = await TrackingLocationPoint.find({ sessionId: req.params.id })
       .sort({ capturedAt: 1 })
       .lean();
-    const geocoded = await geocodeSessionPoints(points);
+
+    if (points.length < 2) {
+      return res.json({
+        sessionId: req.params.id,
+        geometry: null,
+        distanceMeters: 0,
+        durationSeconds: 0,
+        reason: 'Need at least two points',
+      });
+    }
+
+    const route = await getRoute(points);
+
+    if (!route) {
+      return res.json({
+        sessionId: req.params.id,
+        geometry: null,
+        distanceMeters: 0,
+        durationSeconds: 0,
+        reason: 'Route service unavailable',
+      });
+    }
+
     res.json({
       sessionId: req.params.id,
-      points: geocoded,
-      clusterRadiusMeters: 100,
-      attribution: 'Addresses © BigDataCloud, data © OpenStreetMap contributors',
+      geometry: route.geometry,
+      distanceMeters: route.distanceMeters,
+      durationSeconds: route.durationSeconds,
+      attribution: '© Mapbox',
     });
-  } catch (err) {
-    next(err);
-  }
-});
-
-
-// Dashboard summary 
-
-router.get('/dashboard/summary', async (_req, res, next) => {
-  try {
-    const summary = await getDashboardSummary();
-    res.json(summary);
   } catch (err) {
     next(err);
   }

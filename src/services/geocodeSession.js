@@ -3,16 +3,6 @@ import { reverseGeocode } from './geocode.js';
 /**
  * Cluster consecutive points within CLUSTER_RADIUS_M of each other and
  * reverse-geocode each cluster once.
- *
- * Why cluster:
- *   - A single visit can produce 50–200 points.
- *   - Many points are within a few dozen meters of each other.
- *   - Geocoding every point would blow through the free tier and add
- *     hundreds of unnecessary lookups per session.
- *   - Clustering reduces it to typically 15–30 lookups per visit while
- *     still giving each point a meaningful address.
- *
- * Returns: an array of { pointId, address, anchor: { lat, lng } } objects.
  */
 const CLUSTER_RADIUS_M = 100;
 
@@ -30,13 +20,10 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
 export async function geocodeSessionPoints(points) {
   if (!points || points.length === 0) return [];
 
-  // Sort by capturedAt ascending, so clusters form along the timeline.
   const sorted = [...points].sort(
     (a, b) => new Date(a.capturedAt) - new Date(b.capturedAt),
   );
 
-  // Build clusters: a new cluster starts whenever the point is more than
-  // CLUSTER_RADIUS_M from the current cluster's anchor point.
   const clusters = [];
   let current = null;
 
@@ -60,8 +47,6 @@ export async function geocodeSessionPoints(points) {
   }
   if (current) clusters.push(current);
 
-  // Reverse-geocode each cluster once. reverseGeocode is internally
-  // rate-limited and cached, so this is safe to run in parallel.
   const results = await Promise.all(
     clusters.map(async (c) => {
       const addr = await reverseGeocode(c.anchor.lat, c.anchor.lng);

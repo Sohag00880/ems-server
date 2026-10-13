@@ -11,16 +11,33 @@ import { errorHandler } from './middleware/error.js';
 export function createApp() {
   const app = express();
 
+  // Helmet first — sets security headers.
   app.use(helmet());
+
+  // Dev-only log so we can see what origins are allowed.
+  if (env.nodeEnv !== 'production') {
+    // eslint-disable-next-line no-console
+    console.log('[cors] allowed origins:', env.corsOrigins);
+  }
+
+  // CORS — must be before any route handler.
   app.use(
     cors({
       origin: env.corsOrigins,
       credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      maxAge: 600,
     }),
   );
 
-  // Larger body limit than Phase 2 to allow batched offline point uploads.
+  // Answer preflight requests for all routes.
+  app.options('*', cors({ origin: env.corsOrigins, credentials: true }));
+
+  // Body parsing.
   app.use(express.json({ limit: '256kb' }));
+
+  // Cookies for the web refresh-token flow.
   app.use(cookieParser());
 
   // Health check.
@@ -34,9 +51,9 @@ export function createApp() {
   });
 
   // Mount route groups.
-  app.use('/api/auth', authRoutes);        // login / me / refresh / logout
-  app.use('/api/tracking', trackingRoutes); // employee-facing session + point APIs
-  app.use('/api/admin', adminRoutes);      // owner-only employees + admin tracking
+  app.use('/api/auth', authRoutes);
+  app.use('/api/tracking', trackingRoutes);
+  app.use('/api/admin', adminRoutes);
 
   // JSON 404 for unknown routes.
   app.use((_req, res) => {
