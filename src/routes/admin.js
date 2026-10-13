@@ -28,9 +28,6 @@ const router = Router();
 // Every route in this file is OWNER-only.
 router.use(requireAuth, requireRole(ROLES.OWNER));
 
-// ============================================================================
-// Dashboard summary
-// ============================================================================
 
 router.get('/dashboard/summary', async (_req, res, next) => {
   try {
@@ -321,6 +318,30 @@ router.get('/tracking/sessions/:id/route', async (req, res, next) => {
       distanceMeters: route.distanceMeters,
       durationSeconds: route.durationSeconds,
       attribution: '© Mapbox',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+
+
+router.get('/tracking/sessions/:id/timeline', async (req, res, next) => {
+  try {
+    await getSessionForOwner({ sessionId: req.params.id });
+    const points = await TrackingLocationPoint.find({ sessionId: req.params.id })
+      .sort({ capturedAt: 1 })
+      .lean();
+
+    const { buildVisitTimeline } = await import('../services/timeline.js');
+    const result = await buildVisitTimeline(points);
+
+    res.json({
+      sessionId: req.params.id,
+      segments: result.segments,
+      summary: result.summary,
+      attribution: '© Mapbox, data © OpenStreetMap contributors',
     });
   } catch (err) {
     next(err);
